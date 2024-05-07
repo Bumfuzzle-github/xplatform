@@ -1,399 +1,244 @@
 #include "miner.hpp"
 
+namespace Core {
 
-namespace Core
-{
-	Miner::Miner(std::shared_ptr<HttpServer> server, std::vector<int>& peers, BlockChain& blockchain)
-		:
-		server((server)),
-		peers(peers),
-		blockchain(blockchain)
-	{
-		initConsole();
-		start(server, blockchain, peers);
-		setUpPeer(std::move(server), peers, blockchain);
-	}
+    static bool redirectConsoleIO() {
+        bool result = true;
+        FILE* fp;
 
-	void Miner::initConsole()
-	{
-		CreateNewConsole(1024);
-	}
+        auto handleIO = [&](const char* filename, const char* mode, int handleType) {
+            if (GetStdHandle(handleType) != INVALID_HANDLE_VALUE) {
+                if (freopen_s(&fp, filename, mode, stdin) != 0) {
+                    result = false;
+                } else {
+                    setvbuf(stdin, nullptr, _IONBF, 0);
+                }
+            }
+        };
 
+        handleIO("CONIN$", "r", STD_INPUT_HANDLE);
+        handleIO("CONOUT$", "w", STD_OUTPUT_HANDLE);
+        handleIO("CONOUT$", "w", STD_ERROR_HANDLE);
 
-	bool Miner::CreateNewConsole(int16_t length)
-	{
-		bool result = false;
-		ReleaseConsole();
-		if (AllocConsole())
-		{
-			AdjustConsoleBuffer(length);
-			result = RedirectConsoleIO();
-		}
-		return result;
-	}
+        std::ios::sync_with_stdio(true);
 
-	bool Miner::RedirectConsoleIO()
-	{
-		bool result = true;
-		FILE* fp;
+        std::wcout.clear();
+        std::cout.clear();
+        std::wcerr.clear();
+        std::cerr.clear();
+        std::wcin.clear();
+        std::cin.clear();
 
-		// Redirect STDIN if the console has an input handle
-		if (GetStdHandle(STD_INPUT_HANDLE) != INVALID_HANDLE_VALUE)
-			if (freopen_s(&fp, "CONIN$", "r", stdin) != 0)
-				result = false;
-			else
-				setvbuf(stdin, NULL, _IONBF, 0);
+        return result;
+    }
 
-		// Redirect STDOUT if the console has an output handle
-		if (GetStdHandle(STD_OUTPUT_HANDLE) != INVALID_HANDLE_VALUE)
-			if (freopen_s(&fp, "CONOUT$", "w", stdout) != 0)
-				result = false;
-			else
-				setvbuf(stdout, NULL, _IONBF, 0);
+    Miner::Miner(std::shared_ptr<HttpServer> server, std::vector<int>& peers, BlockChain& blockchain)
+        : server(server), peers(peers), blockchain(blockchain) {
+        initConsole();
+        start(server, blockchain, peers);
+        setUpPeer(std::move(server), peers, blockchain);
+    }
 
-		// Redirect STDERR if the console has an error handle
-		if (GetStdHandle(STD_ERROR_HANDLE) != INVALID_HANDLE_VALUE)
-			if (freopen_s(&fp, "CONOUT$", "w", stderr) != 0)
-				result = false;
-			else
-				setvbuf(stderr, NULL, _IONBF, 0);
+    void Miner::initConsole() {
+        CreateNewConsole(1024);
+    }
 
-		// Make C++ standard streams point to console as well.
-		std::ios::sync_with_stdio(true);
+    bool Miner::CreateNewConsole(int16_t length) {
+        ReleaseConsole();
+        if (AllocConsole()) {
+            AdjustConsoleBuffer(length);
+            return redirectConsoleIO();
+        }
+        return false;
+    }
 
-		// Clear the error state for each of the C++ standard streams.
-		std::wcout.clear();
-		std::cout.clear();
-		std::wcerr.clear();
-		std::cerr.clear();
-		std::wcin.clear();
-		std::cin.clear();
+    void Miner::AdjustConsoleBuffer(int16_t minLength) {
+        CONSOLE_SCREEN_BUFFER_INFO conInfo;
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &conInfo)) {
+            if (conInfo.dwSize.Y < minLength) {
+                conInfo.dwSize.Y = minLength;
+                SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), conInfo.dwSize);
+            }
+        }
+    }
 
-		return result;
-	}
+    [[nodiscard]]
+    bool Miner::ReleaseConsole() {
+        bool success = true;
+        FILE* fp;
 
-	[[nodiscard]]
-	bool Miner::ReleaseConsole()
-	{
-		bool result = true;
-		FILE* fp;
-		if (freopen_s(&fp, "NUL:", "r", stdin) != 0)
-			result = false;
-		else
-			setvbuf(stdin, NULL, _IONBF, 0);
-		if (freopen_s(&fp, "NUL:", "w", stdout) != 0)
-			result = false;
-		else
-			setvbuf(stdout, NULL, _IONBF, 0);
-		if (freopen_s(&fp, "NUL:", "w", stderr) != 0)
-			result = false;
-		else
-			setvbuf(stderr, NULL, _IONBF, 0);
-		if (!FreeConsole())
-			result = false;
+        auto resetIO = [&](const char* filename, const char* mode) {
+            if (freopen_s(&fp, filename, mode, stdin) != 0) {
+                success = false;
+            }
+            setvbuf(stdin, nullptr, _IONBF, 0);
+        };
 
-		return result;
-	}
+        resetIO("NUL:", "r");
+        resetIO("NUL:", "w");
+        if (!FreeConsole()) {
+            success = false;
+        }
 
-	void Miner::AdjustConsoleBuffer(int16_t minLength)
-	{
-		CONSOLE_SCREEN_BUFFER_INFO conInfo;
-		GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &conInfo);
-		if (conInfo.dwSize.Y < minLength)
-			conInfo.dwSize.Y = minLength;
-		SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), conInfo.dwSize);
-	}
+        return success;
+    }
 
+    int Miner::getAvailablePort() {
+        std::random_device rd;
+        std::mt19937 rng(rd());
+        std::uniform_int_distribution<int> dist(3000, 4000);
 
-	void Miner::process_input(HWND handle, std::vector<int>& peers, BlockChain& bc)
-	{
-		for (;;)
-		{
-			int lvl;
-			std::string miner;
-			//temporary for testing
-			//The Transaction Ins/Outs with digital sign(EC) is TODO
-			std::string in;
-			std::string out;
-			float amount;
-			std::string input;
-			//TRANSACTION TODO HERE
-			std::vector<std::string> transaction;
-			std::cout << "Type /print to print all blocks" << std::endl;
-			std::cout << "Type /add to add transaction" << std::endl;
-			std::cout << "Type [name] of the block to look at:" << std::endl;
-			std::cin >> input;
+        return dist(rng);
+    }
 
-			if (input == "/print")
-			{
-				bc.printBlocks();
-			}
-			else if (input == "/add")
-			{
-				spdlog::info("Provide miner's name:");
-				std::cin >> miner;
-				spdlog::info("inTX:");
-				std::cin >> in;
-				spdlog::info("outTX:");
-				std::cin >> out;
-				spdlog::info("Amount:");
-				std::cin >> amount;
+    void Miner::writePort(unsigned int port) {
+        std::ofstream file("file.txt", std::ios::out | std::ios::app);
+        if (!file.is_open()) {
+            throw std::ios_base::failure("Failed to open file.");
+        }
+        file << port << '\n';
+    }
 
-				//idiot, no time to think, have to get the work done!
-				std::string tx = "Miner: " + miner + ", " + "InTX: " + in + ", " + "OutTX: " + out + "Amount: +" + std::to_string(amount) + "WBT";
-				transaction.push_back(tx);
-				std::cout << "Enter difficulty level:" << std::endl;
-				std::cin >> lvl;
+    std::vector<int> Miner::readPort(const char* path) {
+        std::ifstream is(path);
+        std::istream_iterator<int> start(is), end;
+        return std::vector<int>(start, end);
+    }
 
-				std::pair<std::string, std::string> pair = Utils::findHash(lvl, bc.getNumOfBlocks(), bc.getLatestBlockHash(), transaction);
+    void Miner::process_input(HWND handle, std::vector<int>& peers, BlockChain& blockchain) {
+        std::string input;
+        while (true) {
+            std::cout << "Commands: /print, /add, [block name]\n";
+            std::cin >> input;
 
-				//This gonna be the main transaction and digital wallet option for the future logic
-				//now it just mimics + .25 WBT each 5 blocks.
-				//Bitcoin does this every 210k blocks as far as i know
-				if ((bc.getNumOfBlocks() != 0) && ((bc.getNumOfBlocks() % 3) == 0))  MessageBox(handle, "+0.25WBT", "Blockchain Message", MB_OK);
-				bc.addBlock(lvl, bc.getNumOfBlocks(), Block::getTime().c_str(), bc.getLatestBlockHash(), pair.first, pair.second, transaction);
-				spdlog::info("Updating blockchain\n");
-				for (int i = 0; i < peers.size(); i++)
-				{
-					int port = peers[i];
-					printf("--- sending to node %d\n", port);
-					HttpClient client("localhost:" + std::to_string(port));
-					auto req = client.request("POST", "/updateLedger", bc.serialize());
-					//std::cout << "Node " << port << " Response: " << req->content.string() << std::endl;
-				}
-			}
-			else
-			{
-				for (unsigned i = 0; i < bc.getNumOfBlocks(); i++)
-				{
-					if (bc.getByName(i) == input)
-					{
-						bc.printBlock(i);
-					}
-					else
-					{
-						spdlog::warn("Either the input is incorrect or i haven't finish this feature yet\n");
-						break;
-					}
-				}
-			}
-		}
-		std::cout << std::endl;
-	}
+            if (input == "/print") {
+                blockchain.printBlocks();
+            } else if (input == "/add") {
+                addTransaction(blockchain, peers, handle);
+            } else {
+                bool found = false;
+                for (int i = 0; i < blockchain.getNumOfBlocks(); ++i) {
+                    if (blockchain.getByName(i) == input) {
+                        blockchain.printBlock(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    spdlog::warn("Block with name '{}' not found.", input);
+                }
+            }
+        }
+    }
 
-	int Miner::getAvilablePort()
-	{
-		std::random_device rd;
-		std::mt19937 rng(rd());
-		std::uniform_int_distribution<int> uni(3000, 4000);
+    void Miner::addTransaction(BlockChain& blockchain, std::vector<int>& peers, HWND handle) {
+        std::string miner, in, out;
+        float amount;
 
-		auto port = uni(rng);
-		return port;
-	}
+        spdlog::info("Enter miner's name:");
+        std::cin >> miner;
 
-	void Miner::writePort(unsigned int port)
-	{
-		std::ofstream file;
-		file.open("file.txt", std::ios::out | std::ios::app);
-		if (file.fail()) throw std::ios_base::failure(std::strerror(errno));
+        spdlog::info("Enter incoming transaction:");
+        std::cin >> in;
 
-		file.exceptions(file.exceptions() | std::ios::failbit | std::ifstream::badbit);
+        spdlog::info("Enter outgoing transaction:");
+        std::cin >> out;
 
-		file << port << std::endl;
-	}
+        spdlog::info("Enter transaction amount:");
+        std::cin >> amount;
 
-	std::vector<int> Miner::readPort(const char* path)
-	{
-		std::ifstream is(path);
-		std::istream_iterator<int> start(is), end;
-		std::vector<int> numbers(start, end);
-		std::copy(numbers.begin(), numbers.end(), std::ostream_iterator<int>(std::cout, ","));
-		return numbers;
-	}
+        std::string tx = fmt::format("Miner: {}, InTX: {}, OutTX: {}, Amount: {:.2f} WBT", miner, in, out, amount);
 
+        std::vector<std::string> transaction{ tx };
 
-	void Miner::setUpPeer(std::shared_ptr<HttpServer> server, std::vector<int>& peers, BlockChain& blockchain)
-	{
-		using json = nlohmann::json;
-		server->resource["^/string$"]["POST"] = [](std::shared_ptr<HttpServer::Response> response, std::shared_ptr<HttpServer::Request> request) {
-			auto content = request->content.string();
-			*response << "HTTP/1.1 200 OK\r\nContent-Length: " << content.length() << "\r\n\r\n" << content;
-		};
+        int difficulty;
+        spdlog::info("Enter difficulty level:");
+        std::cin >> difficulty;
 
-		server->default_resource["GET"] = [](std::shared_ptr<HttpServer::Response> response, std::shared_ptr<HttpServer::Request> request) {
-			using namespace std;
-			try {
+        auto [blockHash, nonce] = Utils::findHash(difficulty, blockchain.getNumOfBlocks(), blockchain.getLatestBlockHash(), transaction);
 
-				auto web_root_path = boost::filesystem::canonical("src/web");
-				auto path = boost::filesystem::canonical(web_root_path / request->path);
-				// Check if path is within web_root_path
-				if (distance(web_root_path.begin(), web_root_path.end()) > distance(path.begin(), path.end()) ||
-					!equal(web_root_path.begin(), web_root_path.end(), path.begin()))
-					throw invalid_argument("path must be within root path");
-				if (boost::filesystem::is_directory(path))
-					path /= "index.html";
+        if ((blockchain.getNumOfBlocks() != 0) && ((blockchain.getNumOfBlocks() % 3) == 0)) {
+            MessageBox(handle, "+0.25WBT", "Blockchain Message", MB_OK);
+        }
 
-				SimpleWeb::CaseInsensitiveMultimap header;
+        blockchain.addBlock(difficulty, blockchain.getNumOfBlocks(), Block::getTime(), 
+                            blockchain.getLatestBlockHash(), blockHash, nonce, transaction);
 
-				// Uncomment the following line to enable Cache-Control
-				// header.emplace("Cache-Control", "max-age=86400");
+        spdlog::info("Updating blockchain...");
+        for (const auto& port : peers) {
+            try {
+                HttpClient client(fmt::format("localhost:{}", port));
+                client.request("POST", "/updateLedger", blockchain.serialize());
+            } catch (const std::exception& ex) {
+                spdlog::warn("Failed to update peer at port {}: {}", port, ex.what());
+            }
+        }
+    }
 
+    int Miner::start(std::shared_ptr<HttpServer> server, BlockChain& blockchain, std::vector<int>& peers) {
+        char user_input;
+        std::cout << "Welcome to WinCoin.\nAre you creating a new blockchain ('y') or joining an existing one ('j')?\n";
+        std::cin >> user_input;
 
-				auto ifs = make_shared<ifstream>();
-				ifs->open(path.string(), ifstream::in | std::ios::binary | std::ios::ate);
+        server->config.port = getAvailablePort();
+        writePort(server->config.port);
 
-				if (*ifs) {
-					auto length = ifs->tellg();
-					ifs->seekg(0, ios::beg);
+        if (user_input == 'y') {
+            blockchain.behave(BlockChain::Stage::GENESIS);
+        } else if (user_input == 'j') {
+            peers = readPort("file.txt");
+            blockchain.behave(BlockChain::Stage::JOIN);
 
-					header.emplace("Content-Length", std::to_string(length));
-					response->write(header);
+            nlohmann::json peer_info;
+            peer_info["port"] = server->config.port;
 
-					// Trick to define a recursive function within this scope (for example purposes)
-					class FileServer {
-					public:
-						static void read_and_send(const shared_ptr<HttpServer::Response>& response, const shared_ptr<ifstream>& ifs) {
-							// Read and send 128 KB at a time
-							static vector<char> buffer(131072); // Safe when server is running on one thread
-							streamsize read_length;
-							if ((read_length = ifs->read(&buffer[0], static_cast<streamsize>(buffer.size())).gcount()) > 0) {
-								response->write(&buffer[0], read_length);
-								if (read_length == static_cast<streamsize>(buffer.size())) {
-									response->send([response, ifs](const SimpleWeb::error_code& ec) {
-										if (!ec)
-											read_and_send(response, ifs);
-										else
-											cerr << "Connection interrupted" << endl;
-										});
-								}
-							}
-						}
-					};
-					FileServer::read_and_send(response, ifs);
-				}
-				else
-					throw invalid_argument("could not read file");
-			}
-			catch (const exception & e) {
-				response->write(SimpleWeb::StatusCode::client_error_bad_request, "Could not open path " + request->path + ": " + e.what());
-			}
-		};
+            for (const auto& port : peers) {
+                HttpClient client(fmt::format("localhost:{}", port));
+                client.request("POST", "/peerpush", peer_info.dump());
+            }
 
-		server->resource["^/current$"]["GET"] = [&blockchain](std::shared_ptr<HttpServer::Response> response, std::shared_ptr<HttpServer::Request> request) {
-			response->write(blockchain.serialize());
-		};
+            updateBlockchainFromPeers(peers, blockchain);
+        } else {
+            spdlog::warn("Invalid input.");
+            return 0;
+        }
 
-		server->resource["^/peerpush$"]["POST"] = [&peers](std::shared_ptr<HttpServer::Response> response, std::shared_ptr<HttpServer::Request> request)
-		{
-			json content = json::parse(request->content);
-			peers.push_back(content["port"].get<int>());
-			spdlog::info("POST / HTTP/1.1 [{0:d}] ", content["port"].get<int>(), " added to peers");
-			*response << "HTTP/1.1 200 OK\r\nContent-Length: " << content.size() << "\r\n\r\n"
-				<< "joined";
-		};
+        return 1;
+    }
 
-		server->resource["^/updateLedger$"]["POST"] = [&blockchain](std::shared_ptr<HttpServer::Response> response, std::shared_ptr<HttpServer::Request> request)
-		{
-			json content = json::parse(request->content);
-			blockchain.blockchain.resize(1);
-			for (unsigned i = 1; i < content["length"].get<int>(); i++)
-			{
-				auto block = content["data"][i];
-				std::vector<std::string> data = block["data"].get<std::vector<std::string>>();
-				blockchain.addBlock(block["difficulty"], block["counter"], block["minedtime"], block["previousHash"], block["hash"], block["nonce"], data);
-			}
-			*response << "HTTP/1.1 200 OK\r\nContent-Length: " << content.size() << "\r\n\r\n" << "Blockchain recreated\n";
-		};
+    void Miner::updateBlockchainFromPeers(const std::vector<int>& peers, BlockChain& blockchain) {
+        std::vector<std::string> blockchains;
+        for (const auto& port : peers) {
+            try {
+                HttpClient client(fmt::format("localhost:{}", port));
+                auto response = client.request("GET", "/current");
+                blockchains.push_back(response->content.string());
+            } catch (const std::exception& ex) {
+                spdlog::warn("Error fetching blockchain from peer at port {}: {}", port, ex.what());
+            }
+        }
 
-		//server.resource["^/json$"]["POST"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
-		//	using namespace boost::property_tree;
-		//	try {
-		//		ptree pt;
-		//		read_json(request->content, pt);
+        if (blockchains.empty()) {
+            spdlog::error("No blockchains found from peers.");
+            return;
+        }
 
-		//		auto name = pt.get<string>("firstName") + " " + pt.get<string>("lastName");
+        auto longest_blockchain = std::max_element(
+            blockchains.begin(), 
+            blockchains.end(), 
+            [](const std::string& a, const std::string& b) {
+                nlohmann::json json_a = nlohmann::json::parse(a);
+                nlohmann::json json_b = nlohmann::json::parse(b);
+                return json_a["length"].get<int>() < json_b["length"].get<int>();
+            }
+        );
 
-		//		*response << "HTTP/1.1 200 OK\r\n"
-		//			<< "Content-Length: " << name.length() << "\r\n\r\n"
-		//			<< name;
-		//	}
-		//	catch (const exception & e) {
-		//		*response << "HTTP/1.1 400 Bad Request\r\nContent-Length: " << strlen(e.what()) << "\r\n\r\n"
-		//			<< e.what();
-		//	}
-		//};
-
-
-		//// GET-example for the path /match/[number], responds with the matched string in path (number)
-		//// For instance a request GET /match/123 will receive: 123
-		//server.resource["^/match/([0-9]+)$"]["GET"] = [](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
-		//	response->write(request->path_match[1]);
-		//};
-
-		spdlog::info("Server started at localhost:{0:d}", server->config.port);
-	}
-
-	int Miner::start(std::shared_ptr<HttpServer> server, BlockChain& blockchain, std::vector<int>& peers)
-	{
-		char in;
-		spdlog::info("Test spdlog");
-		spdlog::warn("Easy padding in numbers like {:08d}", 12);
-		spdlog::critical("Support for int: {0:d};  hex: {0:x};  oct: {0:o}; bin: {0:b}", 42);
-		spdlog::error("Some error message with arg: {}", 1);
-		std::cout << "Welcome to WinCoin.\n" << std::endl;
-		std::cout << "If you are creating a new blockchain, type 'y',\n if you are joining the existing, type 'j':\n ";
-		std::cin >> in;
-
-		server->config.port = getAvilablePort();
-		writePort(server->config.port);
-		using json = nlohmann::json;
-		if (in == 'y') blockchain.behave(BlockChain::Stage::GENESIS);
-
-		else if (in == 'j')
-		{
-			peers = readPort("file.txt");
-			blockchain.behave(BlockChain::Stage::JOIN);
-
-			json j;
-			j["port"] = server->config.port;
-			for (int i = 0; i < peers.size() - 1; i++)
-			{
-				int port = peers[i];
-				HttpClient client("localhost:" + std::to_string(port));
-				std::shared_ptr<HttpClient::Response> response = client.request("POST", "/peerpush", j.dump());
-				std::shared_ptr<HttpClient::Response> Defaultresponse = client.request("GET");
-			}
-
-			std::vector<std::string> vect;
-			for (int a = 0; a < peers.size() - 1; a++)
-			{
-				int port = peers[a];
-				HttpClient client("localhost:" + std::to_string(port));
-				std::shared_ptr<HttpClient::Response> response = client.request("GET", "/current");
-				vect.push_back(response->content.string());
-			}
-
-			json chain = json::parse(vect[0]);
-			int max = 0;
-			for (int i = 0; i < vect.size(); i++) {
-				json json_data = json::parse(vect[i]);
-				if (max < json_data["length"].get<int>())
-				{
-					max = json_data["length"].get<int>();
-					chain = json_data;
-				}
-			}
-
-			for (int a = 0; a < chain["length"].get<int>(); a++)
-			{
-				auto block = chain["data"][a];
-				std::vector<std::string> data = block["data"].get<std::vector<std::string>>();
-				blockchain.addBlock(block["difficulty"], block["counter"], block["minedtime"], block["previousHash"], block["hash"], block["nonce"], data);
-			}
-		}
-		else
-		{
-			return 0;
-		}
-	}
-}
+        nlohmann::json json_blockchain = nlohmann::json::parse(*longest_blockchain);
+        for (size_t i = 0; i < json_blockchain["length"].get<int>(); ++i) {
+            auto block = json_blockchain["data"][i];
+            std::vector<std::string> data = block["data"].get<std::vector<std::string>>();
+            blockchain.addBlock(block["difficulty"], block["counter"], block["minedtime"], 
+                                block["previousHash"], block["hash"], block["nonce"], data);
+        }
+    }
+} 
